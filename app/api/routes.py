@@ -99,7 +99,9 @@ async def stripe_webhook(
         raise HTTPException(status_code=400, detail=f"Invalid signature: {exc}") from exc
 
     event_type = event["type"]
-    data_object = event["data"]["object"]
+    # Newer stripe-python versions no longer make StripeObject dict-like
+    # (no .get()) — convert explicitly so billing.py can use plain dict access.
+    data_object = event["data"]["object"].to_dict()
 
     if event_type == "checkout.session.completed":
         billing.upsert_subscription_from_checkout(data_object)
