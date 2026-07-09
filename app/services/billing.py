@@ -1,4 +1,4 @@
-"""Sync Stripe subscription state to Supabase + record stub usage billing lines."""
+"""Sync Stripe subscription state to Supabase + record usage billing lines (V2 dynamic pricing)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.db.client import get_supabase
+from app.services.pricing import compute_line_pricing
 
 PLAN_FREE = "free"
 PLAN_PRO = "pro"
@@ -16,6 +17,30 @@ ACTIVE_STATUSES = {"active", "trialing"}
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _month_bounds(month: str | None) -> tuple[str | None, str | None]:
+    if not month:
+        now = datetime.now(timezone.utc)
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if start.month == 12:
+            end = start.replace(year=start.year + 1, month=1)
+        else:
+            end = start.replace(month=start.month + 1)
+        return start.isoformat(), end.isoformat()
+
+    try:
+        year_str, month_str = month.split("-", 1)
+        year = int(year_str)
+        mon = int(month_str)
+        start = datetime(year, mon, 1, tzinfo=timezone.utc)
+        if mon == 12:
+            end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            end = datetime(year, mon + 1, 1, tzinfo=timezone.utc)
+        return start.isoformat(), end.isoformat()
+    except (ValueError, TypeError):
+        return _month_bounds(None)
 
 
 def plan_from_status(status: str) -> str:
@@ -85,17 +110,102 @@ def is_org_pro(org_id: str) -> bool:
     return sub.get("plan") == PLAN_PRO and sub.get("status") in ACTIVE_STATUSES
 
 
-def record_usage(org_id: str, flex_slot_id: str | None) -> dict[str, Any]:
-    """Insert a stub billing line for a flex_slot (V1: fixed amount, test mode)."""
-    settings = get_settings()
-    amount_cents = int(settings.get("usage_stub_amount_cents") or 50)
+def _get_flex_slot(flex_slot_id: str | None) -> dict[str, Any] | None:
+    if not flex_slot_id:
+        return None
+    client = get_supabase()
+    resp = (
+        client.table("flex_slots")
+        .select(
+            "id, org_id, power_kw, start_at, end_at, gridpulse_score, source, kind, status"
+        )
+        .eq("id", flex_slot_id)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
 
+
+def _get_existing_line(flex_slot_id: str | None) -> dict[str, Any] | None:
+    if not flex_slot_id:
+        return None
+    client = get_supabase()
+    resp = (
+        client.table("billing_lines")
+        .select("*")
+        .eq("flex_slot_id", flex_slot_id)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def record_usage(org_id: str, flex_slot_id: str | None) -> dict[str, Any]:
+    """Insert a billing line for a flex_slot (V2: dynamic pricing, idempotent per slot)."""
+    existing = _get_existing_line(flex_slot_id)
+    if existing:
+        return existing
+
+    slot = _get_flex_slot(flex_slot_id)
+    if slot and slot.get("org_id") != org_id:
+        raise ValueError("flex_slot does not belong to org")
+
+    pricing = compute_line_pricing(slot)
     client = get_supabase()
     row = {
         "org_id": org_id,
         "flex_slot_id": flex_slot_id,
-        "amount_cents": amount_cents,
+        "amount_cents": pricing["amount_cents"],
+        "kwh": pricing["kwh"],
+        "duration_hours": pricing["duration_hours"],
+        "unit_price_cents": pricing["unit_price_cents"],
+        "pricing_source": pricing["pricing_source"],
+        "carbon_gco2_kwh": pricing["carbon_gco2_kwh"],
+        "hp_hc_band": pricing["hp_hc_band"],
         "created_at": _now_iso(),
     }
     resp = client.table("billing_lines").insert(row).execute()
     return resp.data[0] if resp.data else row
+
+
+def list_billing_lines(
+    org_id: str,
+    *,
+    month: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    start_iso, end_iso = _month_bounds(month)
+    client = get_supabase()
+    query = (
+        client.table("billing_lines")
+        .select(
+            "id, org_id, flex_slot_id, amount_cents, kwh, duration_hours, "
+            "unit_price_cents, pricing_source, carbon_gco2_kwh, hp_hc_band, created_at"
+        )
+        .eq("org_id", org_id)
+        .order("created_at", desc=True)
+        .limit(max(1, min(limit, 200)))
+    )
+    if start_iso and end_iso:
+        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+    resp = query.execute()
+    return resp.data or []
+
+
+def get_usage_summary(org_id: str, *, month: str | None = None) -> dict[str, Any]:
+    lines = list_billing_lines(org_id, month=month, limit=200)
+    total_cents = sum(int(line.get("amount_cents") or 0) for line in lines)
+    total_kwh = round(
+        sum(float(line.get("kwh") or 0) for line in lines if line.get("kwh") is not None),
+        3,
+    )
+    start_iso, end_iso = _month_bounds(month)
+    return {
+        "org_id": org_id,
+        "month": month or datetime.now(timezone.utc).strftime("%Y-%m"),
+        "period_start": start_iso,
+        "period_end": end_iso,
+        "line_count": len(lines),
+        "total_cents": total_cents,
+        "total_kwh": total_kwh,
+    }

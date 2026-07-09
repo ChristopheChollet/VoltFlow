@@ -29,5 +29,7 @@ def get_settings() -> dict[str, str | None]:
             "BILLING_PORTAL_RETURN_URL", "http://localhost:3000/billing"
         ),
         "usage_stub_amount_cents": os.getenv("USAGE_STUB_AMOUNT_CENTS", "50"),
+        "base_price_cents_per_kwh": os.getenv("BASE_PRICE_CENTS_PER_KWH", "12"),
+        "gridpulse_api_url": os.getenv("GRIDPULSE_API_URL"),
         "cors_origins": os.getenv("CORS_ORIGINS", "http://localhost:3000"),
     }

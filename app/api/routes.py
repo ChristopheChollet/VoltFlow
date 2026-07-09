@@ -81,7 +81,32 @@ def post_usage_record(
         raise HTTPException(status_code=400, detail="org_id is required")
     if not billing.is_org_pro(org_id):
         raise HTTPException(status_code=402, detail="Org is not on the Pro plan")
-    return billing.record_usage(org_id, flex_slot_id)
+    try:
+        return billing.record_usage(org_id, flex_slot_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/v1/billing-lines/{org_id}")
+def get_billing_lines(
+    org_id: str,
+    month: str | None = None,
+    limit: int = 50,
+    x_voltflow_service_key: str | None = Header(default=None, alias="X-VoltFlow-Service-Key"),
+) -> dict[str, Any]:
+    _check_service_key(x_voltflow_service_key)
+    lines = billing.list_billing_lines(org_id, month=month, limit=limit)
+    return {"org_id": org_id, "lines": lines, "count": len(lines)}
+
+
+@router.get("/api/v1/usage/{org_id}")
+def get_usage_summary(
+    org_id: str,
+    month: str | None = None,
+    x_voltflow_service_key: str | None = Header(default=None, alias="X-VoltFlow-Service-Key"),
+) -> dict[str, Any]:
+    _check_service_key(x_voltflow_service_key)
+    return billing.get_usage_summary(org_id, month=month)
 
 
 @router.post("/webhooks/stripe")

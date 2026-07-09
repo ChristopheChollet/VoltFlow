@@ -30,6 +30,8 @@ GreenOps (Next.js) ──service key──▶ VoltFlow (FastAPI) ──▶ Strip
 
 ## Démarrage local
 
+Guide pas-à-pas (GreenOps local, switch prod/local, webhooks Stripe CLI) : [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md).
+
 ### 1. Supabase
 
 Aucun nouveau projet : VoltFlow lit/écrit sur le **même projet Supabase que GreenOps**. Exécuter [`supabase/migrations/001_subscriptions.sql`](supabase/migrations/001_subscriptions.sql) dans le SQL Editor de ce projet (après les migrations GreenOps, dont il dépend : `organizations`, `flex_slots`, `user_org_ids()`).

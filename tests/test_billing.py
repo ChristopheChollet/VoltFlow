@@ -60,21 +60,59 @@ def test_upsert_subscription_from_stripe_subscription_downgrades_on_cancel():
     )
 
 
-def test_record_usage_inserts_stub_amount(monkeypatch):
-    monkeypatch.setenv("USAGE_STUB_AMOUNT_CENTS", "75")
+def test_record_usage_inserts_dynamic_pricing(monkeypatch):
     fake_table = MagicMock()
-    fake_table.insert.return_value.execute.return_value = MagicMock(data=[{"id": "line-1"}])
+    fake_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = (
+        MagicMock(data=[])
+    )
+    fake_table.insert.return_value.execute.return_value = MagicMock(
+        data=[
+            {
+                "id": "line-1",
+                "amount_cents": 120,
+                "pricing_source": "gridpulse_carbon",
+            }
+        ]
+    )
     fake_client = MagicMock()
     fake_client.table.return_value = fake_table
 
+    slot = {
+        "id": "slot-1",
+        "org_id": "org-1",
+        "power_kw": 5,
+        "start_at": "2026-01-06T09:00:00+00:00",
+        "end_at": "2026-01-06T10:00:00+00:00",
+        "gridpulse_score": None,
+    }
+
     with patch("app.services.billing.get_supabase", return_value=fake_client):
+        with patch("app.services.billing._get_flex_slot", return_value=slot):
+            with patch(
+                "app.services.billing.compute_line_pricing",
+                return_value={
+                    "amount_cents": 120,
+                    "kwh": 5.0,
+                    "duration_hours": 1.0,
+                    "unit_price_cents": 24,
+                    "pricing_source": "gridpulse_carbon",
+                    "carbon_gco2_kwh": 70.0,
+                    "hp_hc_band": "HP",
+                },
+            ):
+                result = billing.record_usage("org-1", "slot-1")
+
+    assert result["id"] == "line-1"
+    fake_table.insert.assert_called_once()
+
+
+def test_record_usage_is_idempotent_for_same_slot():
+    existing = {"id": "line-existing", "flex_slot_id": "slot-1", "amount_cents": 50}
+
+    with patch("app.services.billing._get_existing_line", return_value=existing):
         result = billing.record_usage("org-1", "slot-1")
 
-    assert result == {"id": "line-1"}
-    args, _ = fake_table.insert.call_args
-    assert args[0]["amount_cents"] == 75
-    assert args[0]["org_id"] == "org-1"
-    assert args[0]["flex_slot_id"] == "slot-1"
+    assert result == existing
 
 
 def test_is_org_pro_true_when_active(monkeypatch):
